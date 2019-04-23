@@ -1,4 +1,3 @@
-import json
 import numpy as np
 from collections import OrderedDict
 import torch
@@ -7,6 +6,8 @@ from torch import optim
 import torch.nn.functional as F
 from torchvision import datasets, transforms, models
 from PIL import Image
+import util
+import pdb
 
 class FlowerClassifier:
     def __init__(self, arch, hidden_units, gpu):
@@ -15,14 +16,11 @@ class FlowerClassifier:
         self.hidden_units = hidden_units
         self.model = self.build_model()
         print(self.model)
-        self.cat_to_name = self.get_cat_to_name()
+        self.class_to_idx = None
         self.device = torch.device("cuda" if gpu and torch.cuda.is_available() else "cpu")
-        
-    def get_cat_to_name(self):
-        with open('cat_to_name.json', 'r') as f:
-            cat_to_name = json.load(f)
-        
-        return cat_to_name
+        self.final_epoch = None
+        self.train_losses = []
+        self.test_losses = []
         
     def build_model(self):
         # get pretrained model
@@ -33,11 +31,10 @@ class FlowerClassifier:
             param.requires_grad = False
             
         # attach final layer
-        # TODO: dry
         if self.arch == 'vgg11':
             model.classifier = self.build_final_layer(25088)
-        elif self.arch == 'resnet18':
-            model.fc = self.build_final_layer(512)
+        elif self.arch == 'alexnet':
+            model.classifier = self.build_final_layer(9216)
         else:
             raise Exception('Invalid architecture')
             
@@ -54,15 +51,9 @@ class FlowerClassifier:
         return classifier
     
     def train(self, data_dir, epochs, learning_rate):
-        image_datasets, dataloaders = self.load_data(data_dir)
+        image_datasets, dataloaders, class_to_idx  = self.load_data(data_dir)
         criterion = nn.NLLLoss()
-        # TODO: dry
-        if self.arch == 'vgg11':
-            optimizer = optim.Adam(self.model.classifier.parameters(), lr=learning_rate)
-        elif self.arch == 'resnet18':
-            optimizer = optim.Adam(self.model.fc.parameters(), lr=learning_rate)
-        else:
-            raise 'Invalid architecture'
+        optimizer = optim.Adam(self.model.classifier.parameters(), lr=learning_rate)
         
         # gpu or cpu
         self.model.to(self.device)
@@ -131,7 +122,11 @@ class FlowerClassifier:
                   f'Accuracy {(accuracy / n_test_batches):{0}.{4}}'
                  )
         
-        return e+1, train_losses, test_losses
+        #return e+1, train_losses, test_losses
+        self.final_epoch = e+1
+        self.train_losses = train_losses
+        self.test_losses = test_losses
+        self.class_to_idx = class_to_idx
         
     def load_data(self, data_dir):
         train_dir = data_dir + '/train'
@@ -167,7 +162,56 @@ class FlowerClassifier:
             'valid': torch.utils.data.DataLoader(image_datasets['valid'], batch_size=64)
         }
         
-        return image_datasets, dataloaders
+        return image_datasets, dataloaders, image_datasets['train'].class_to_idx
+    
+    def predict(self, image_path, top_k, cat_to_name_path):
+        ''' Predict the class (or classes) of an image using a trained deep learning model.
+        '''
+        self.model.to(self.device)
+
+        im = Image.open(image_path)
+        im_tensor = util.process_image(im)
+    #     print(im_tensor.shape)
+
+        im_tensor.unsqueeze_(0)
+#         print(im_tensor.shape)
+
+#         log_ps = self.model.forward(im_tensor.float())
+        im_tensor = im_tensor.to(self.device)
+    
+        # get probabilities without gradients
+        with torch.no_grad():
+            log_ps = self.model.forward(im_tensor.float())
+        ps = torch.exp(log_ps)
+
+        # get top probabilities
+        top_probs, top_indexes = ps.topk(top_k)
+    #     print(f'top_probs: {top_probs}') 
+    #     print(f'top_indexes: {top_indexes}')      
+
+        # flatten
+        top_probs = top_probs.cpu().numpy().reshape(top_k,)
+    #     print(f'top_probs: {top_probs}')
+
+        top_indexes = top_indexes.cpu().numpy().reshape(top_k,)
+    #     print(f'top_indexes: {top_indexes}')
+
+        #print(f'model.class_to_idx: {model.class_to_idx}')
+
+        idx_to_class = {v: str(k) for k, v in self.class_to_idx.items()}
+        #print(f'idx_to_class: {idx_to_class}')
+
+        top_classes = []
+        for tc in top_indexes: top_classes.append(idx_to_class[tc])
+            
+        #[idx_to_class[tc] for tc in top_indexes.cpu().numpy()]
+        
+        # get class names
+        class_to_name = util.read_json_file(cat_to_name_path)
+        
+        return top_probs, [class_to_name[tc] for tc in top_classes]
+   
+        
         
         
     
